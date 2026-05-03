@@ -1,0 +1,310 @@
+---
+title: "Epidemic Curve & Herd Immunity Threshold Analysis"
+author: "Epidemiology Unit"
+date: today
+format:
+  docx:
+    toc: true
+    number-sections: true
+    fig-width: 7.5
+    fig-height: 4.5
+    fig-dpi: 180
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(scales)
+library(lubridate)
+library(ggrepel)
+library(knitr)
+```
+
+## Load and Inspect Data
+
+```{r load}
+df <- read_csv("epidemic_data.csv",
+               col_types = cols(onset_date = col_date()))
+glimpse(df)
+df |> slice_head(n = 6) |> kable(caption = "First 6 rows of dataset")
+```
+
+```{r summary-stats}
+df |>
+  group_by(disease, r0, hit_pct) |>
+  summarise(
+    cases      = n(),
+    pct_unvacc = round(mean(vaccinated == "No") * 100, 1),
+    pct_severe = round(mean(severity   == "Severe") * 100, 1),
+    .groups = "drop"
+  ) |>
+  arrange(desc(r0)) |>
+  kable(caption = "Outbreak summary by disease")
+```
+
+Measles and Pertussis share R0 = 15 and the highest HIT (93.3%). Unvaccinated cases exceed 65% across all diseases.
+
+---
+
+## Epidemic Curves
+
+### Overall Weekly Incidence (Measles)
+
+```{r epi-curve-overall}
+#| fig-cap: "Weekly measles case counts. Peak around week 6-7 confirms propagated-source transmission."
+
+measles <- df |>
+  filter(disease == "Measles") |>
+  mutate(week = floor_date(onset_date, "week")) |>
+  count(week, name = "cases")
+
+pk <- measles |> filter(cases == max(cases))
+
+ggplot(measles, aes(week, cases)) +
+  geom_col(fill = "#C0392B", colour = "white",
+           width = 6, alpha = 0.88) +
+  geom_smooth(method = "loess", se = FALSE,
+              colour = "#2C3E50", linewidth = 0.9,
+              linetype = "dashed") +
+  annotate("label", x = pk$week, y = pk$cases + 8,
+           label = paste0("Peak: ", pk$cases, " cases"),
+           size = 3, colour = "#C0392B",
+           fill = "white", label.size = 0.3) +
+  scale_x_date(date_labels = "%d %b",
+               date_breaks = "2 weeks") +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, .15))) +
+  labs(title = "Measles Epidemic Curve — Weekly Cases",
+       x = "Week of Onset", y = "Cases") +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    axis.text.x      = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### Age-Stratified Curve
+
+```{r epi-curve-age}
+#| fig-cap: "Children 5-14 and young adults 15-29 bear the greatest burden."
+
+df |>
+  filter(disease == "Measles") |>
+  mutate(week = floor_date(onset_date, "week")) |>
+  count(week, age_group) |>
+  ggplot(aes(week, n, fill = age_group)) +
+  geom_col(colour = "white", width = 6, alpha = 0.90) +
+  scale_fill_manual(
+    values = c("0-4"  = "#E74C3C",
+               "5-14" = "#E67E22",
+               "15-29"= "#3498DB",
+               "30-49"= "#27AE60",
+               "50+"  = "#8E44AD"),
+    name = "Age group") +
+  scale_x_date(date_labels = "%d %b",
+               date_breaks = "2 weeks") +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, .1))) +
+  labs(title = "Measles: Age-Stratified Epidemic Curve",
+       x = "Week of Onset", y = "Cases") +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    axis.text.x      = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### Multi-Disease Incidence Comparison
+
+```{r epi-curve-multi}
+#| fig-cap: "High-R0 diseases peak earlier and steeper than low-R0 ones."
+#| fig-height: 6
+
+df |>
+  mutate(week = floor_date(onset_date, "week")) |>
+  count(disease, week) |>
+  ggplot(aes(week, n, fill = disease)) +
+  geom_col(width = 5, alpha = 0.85, colour = NA) +
+  facet_wrap(~ disease, ncol = 2, scales = "free_y") +
+  scale_x_date(date_labels = "%b",
+               date_breaks = "1 month") +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, .1))) +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  labs(title = "Epidemic Curves by Disease (Weekly)",
+       x = "Month", y = "Cases") +
+  theme_minimal(base_size = 9) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    strip.text       = element_text(face = "bold"),
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+```
+
+High-R0 diseases (Measles, Pertussis) produce sharp narrow peaks. Influenza and Ebola spread more slowly with flatter curves.
+
+---
+
+## Herd Immunity Threshold
+
+$$HIT = 1 - \frac{1}{R_0}$$
+
+When population immunity >= HIT, each case generates fewer than one secondary infection and the outbreak declines.
+
+```{r hit-reference}
+df |>
+  distinct(disease, r0, hit_pct) |>
+  arrange(desc(r0)) |>
+  rename(Disease = disease, R0 = r0, `HIT (%)` = hit_pct) |>
+  kable(caption = "Herd immunity thresholds by disease")
+```
+
+### HIT Bar Chart
+
+```{r hit-bar}
+#| fig-cap: "Measles and Pertussis require >93% coverage."
+
+df |>
+  distinct(disease, r0, hit_pct) |>
+  ggplot(aes(reorder(disease, hit_pct),
+             hit_pct, fill = hit_pct)) +
+  geom_col(width = 0.65, alpha = 0.92,
+           show.legend = FALSE) +
+  geom_text(aes(label = paste0(hit_pct, "%")),
+            hjust = -0.15, size = 3.2,
+            fontface = "bold") +
+  geom_hline(yintercept = 70,
+             linetype = "dashed",
+             colour = "#E67E22", linewidth = 0.7) +
+  annotate("text", x = 0.7, y = 71.5,
+           label = "70% line",
+           colour = "#E67E22", size = 2.8) +
+  scale_fill_gradient(low = "#F8C471",
+                      high = "#922B21") +
+  scale_y_continuous(limits = c(0, 107),
+    labels = label_percent(scale = 1)) +
+  coord_flip() +
+  labs(title = "Herd Immunity Threshold by Disease",
+       x = NULL, y = "HIT (%)") +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title         = element_text(face = "bold"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank()
+  )
+```
+
+### Continuous HIT-R0 Curve
+
+```{r hit-curve}
+#| fig-cap: "Non-linear growth: small R0 increases demand disproportionate immunity gains."
+
+pts <- df |> distinct(disease, r0, hit_pct)
+
+tibble(R0  = seq(1.01, 20, 0.05),
+       HIT = (1 - 1/R0) * 100) |>
+  ggplot(aes(R0, HIT)) +
+  geom_line(colour = "#2980B9", linewidth = 1.3) +
+  geom_area(fill = "#AED6F1", alpha = 0.3) +
+  geom_point(data = pts,
+    aes(x = r0, y = hit_pct, colour = disease),
+    size = 3, show.legend = TRUE) +
+  geom_label_repel(
+    data = pts,
+    aes(x = r0, y = hit_pct,
+        label = disease, colour = disease),
+    size = 2.5, show.legend = FALSE,
+    label.size = 0.2, max.overlaps = 10) +
+  scale_x_continuous(breaks = seq(0, 20, 2)) +
+  scale_y_continuous(
+    labels = label_percent(scale = 1),
+    breaks = seq(0, 100, 10)) +
+  labs(title = "HIT as a Function of R0",
+       x = "Basic Reproduction Number (R0)",
+       y = "Herd Immunity Threshold (%)",
+       colour = "Disease") +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    legend.position  = "bottom",
+    panel.grid.minor = element_blank()
+  )
+```
+
+---
+
+## Vaccination & Severity Analysis
+
+```{r vacc-analysis}
+#| fig-cap: "Unvaccinated individuals dominate case counts across all diseases."
+
+df |>
+  count(disease, vaccinated) |>
+  group_by(disease) |>
+  mutate(pct = n / sum(n) * 100) |>
+  ggplot(aes(reorder(disease, pct),
+             pct, fill = vaccinated)) +
+  geom_col(width = 0.65, alpha = 0.90) +
+  geom_hline(yintercept = 50,
+             linetype = "dashed",
+             colour = "grey40", linewidth = 0.5) +
+  scale_fill_manual(
+    values = c("Yes" = "#27AE60",
+               "No"  = "#C0392B"),
+    name = "Vaccinated") +
+  scale_y_continuous(
+    labels = label_percent(scale = 1)) +
+  coord_flip() +
+  labs(title = "Case Distribution by Vaccination Status",
+       x = NULL, y = "% of Cases") +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title         = element_text(face = "bold"),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+```{r severity-analysis}
+#| fig-cap: "Severe cases are consistently higher among unvaccinated patients."
+
+df |>
+  count(disease, vaccinated, severity) |>
+  group_by(disease, vaccinated) |>
+  mutate(pct = n / sum(n) * 100) |>
+  filter(severity == "Severe") |>
+  ggplot(aes(disease, pct, fill = vaccinated)) +
+  geom_col(position = "dodge",
+           width = 0.6, alpha = 0.90) +
+  scale_fill_manual(
+    values = c("Yes" = "#27AE60",
+               "No"  = "#C0392B"),
+    name = "Vaccinated") +
+  scale_y_continuous(
+    labels = label_percent(scale = 1)) +
+  labs(title = "% Severe Cases by Disease & Vaccination Status",
+       x = NULL, y = "% Severe") +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    axis.text.x      = element_text(angle = 40, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+```
+
+Unvaccinated patients show higher severe-case proportions across all diseases. The severity gap is widest for Measles and Pertussis where vaccine-derived protection matters most.
+
+---
+
+## Key Findings
+
+- **Epidemic shape:** High-R0 diseases produce narrow tall peaks; low-R0 diseases produce flat prolonged curves.
+- **HIT non-linearity:** R0 = 15 requires 93.3% immunity vs 60% for R0 = 2.5 — a small absolute gap with large operational consequences.
+- **Vaccination gap:** Over 65% of cases across all diseases were unvaccinated — the primary modifiable risk factor.
+- **Severity:** Unvaccinated individuals carry a disproportionate share of severe outcomes, reinforcing the individual and population benefit of vaccination.
